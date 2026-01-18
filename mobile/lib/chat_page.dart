@@ -302,9 +302,26 @@ class _KaironChatPageState extends State<KaironChatPage> {
               mergedSubjects = subjects;
             }
           } else {
-            throw Exception(
-              'Lỗi máy chủ (extract_schedule): ${response.statusCode} - ${response.body}',
-            );
+            String message = '';
+            try {
+              final decoded = jsonDecode(response.body);
+              if (decoded is Map && decoded['error'] is String) {
+                message = decoded['error'] as String;
+              }
+            } catch (_) {}
+            if (response.statusCode >= 500 && response.statusCode < 600) {
+              final base =
+                  'Máy chủ xử lý ảnh đang gặp lỗi (${response.statusCode}).';
+              final detail =
+                  message.isNotEmpty ? ' Chi tiết: $message' : '';
+              throw HttpException('$base$detail');
+            } else {
+              final base =
+                  'Yêu cầu xử lý ảnh không hợp lệ (${response.statusCode}).';
+              final detail =
+                  message.isNotEmpty ? ' Chi tiết: $message' : '';
+              throw HttpException('$base$detail');
+            }
           }
         }
       }
@@ -371,9 +388,28 @@ class _KaironChatPageState extends State<KaironChatPage> {
       }
 
       if (response.statusCode != 200) {
-        throw Exception(
-          'Lỗi máy chủ: ${response.statusCode} - ${response.body}',
-        );
+        String message = '';
+        try {
+          final decoded = jsonDecode(response.body);
+          if (decoded is Map && decoded['error'] is String) {
+            message = decoded['error'] as String;
+          } else if (decoded is Map && decoded['message'] is String) {
+            message = decoded['message'] as String;
+          }
+        } catch (_) {}
+        if (response.statusCode >= 500 && response.statusCode < 600) {
+          final base =
+              'Máy chủ KaironAI đang gặp lỗi (${response.statusCode}).';
+          final detail =
+              message.isNotEmpty ? ' Chi tiết: $message' : '';
+          throw HttpException('$base$detail', uri: uriChat);
+        } else {
+          final base =
+              'Yêu cầu gửi lên máy chủ không hợp lệ (${response.statusCode}).';
+          final detail =
+              message.isNotEmpty ? ' Chi tiết: $message' : '';
+          throw HttpException('$base$detail', uri: uriChat);
+        }
       }
 
       final Map<String, dynamic> data = jsonDecode(response.body);
@@ -407,13 +443,13 @@ class _KaironChatPageState extends State<KaironChatPage> {
       if (_cancelled) {
         return;
       }
-          chatState.add(
-            ChatMessage(
-              fromUser: false,
-              text:
-                  'KaironAI nghĩ hơi lâu quá 25 giây nên tạm dừng. Chi tiết: $e',
-            ),
-          );
+      chatState.add(
+        ChatMessage(
+          fromUser: false,
+          text:
+              'KaironAI nghĩ hơi lâu quá 60 giây nên tạm dừng. Bạn thử gửi lại sau một lát nhé.',
+        ),
+      );
     } catch (e) {
       if (_cancelled) {
         return;
@@ -421,8 +457,7 @@ class _KaironChatPageState extends State<KaironChatPage> {
       chatState.add(
         ChatMessage(
           fromUser: false,
-          text:
-              'KaironAI không bắt được tín hiệu mạng. Chi tiết: $e',
+          text: 'KaironAI không bắt được tín hiệu mạng hoặc máy chủ đang lỗi. Chi tiết: $e',
         ),
       );
     } finally {

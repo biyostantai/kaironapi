@@ -390,6 +390,8 @@ extension on PersonaState {
 class ScheduleState extends ChangeNotifier {
   static const String _storageKeyPrefix = 'subjects_';
   static const String _pinnedKeyPrefix = 'pinned_subjects_';
+  static const int _classReminderBaseId = 5000;
+  static const int _classReminderMaxCount = 512;
 
   List<SubjectSchedule> _subjects = [];
   Set<String> _pinnedKeys = {};
@@ -503,6 +505,7 @@ class ScheduleState extends ChangeNotifier {
       _pinnedKeys = pinned.toSet();
     }
     _subjectsSignature = _buildSubjectsSignature(_subjects);
+    await _rescheduleClassReminders();
     notifyListeners();
   }
 
@@ -545,6 +548,7 @@ class ScheduleState extends ChangeNotifier {
     if (newSignature != previousSignature) {
       await _saveToStorage();
     }
+    await _rescheduleClassReminders();
     notifyListeners();
   }
 
@@ -627,6 +631,9 @@ class ScheduleState extends ChangeNotifier {
     }
     _saveToStorage();
     _syncToFirestore();
+    () async {
+      await _rescheduleClassReminders();
+    }();
     notifyListeners();
   }
 
@@ -644,6 +651,9 @@ class ScheduleState extends ChangeNotifier {
     }
     _saveToStorage();
     _syncToFirestore();
+    () async {
+      await _rescheduleClassReminders();
+    }();
     notifyListeners();
   }
 
@@ -701,6 +711,64 @@ class ScheduleState extends ChangeNotifier {
 
     return subjects.first;
   }
+
+  Future<void> refreshClassReminders() async {
+    await _rescheduleClassReminders();
+  }
+
+  Future<void> _rescheduleClassReminders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final alarmEnabled = prefs.getBool('alarm_mode_enabled') ?? false;
+    final reminderMinutes = prefs.getInt('alarm_reminder_minutes') ?? 15;
+    for (int i = 0; i < _classReminderMaxCount; i++) {
+      await AlarmService.cancel(_classReminderBaseId + i);
+    }
+    if (!alarmEnabled || reminderMinutes <= 0) {
+      return;
+    }
+    if (_subjects.isEmpty) {
+      return;
+    }
+    final now = TimeService.now();
+    final entries = _subjects
+        .map(
+          (subject) => MapEntry(
+            subject,
+            _parseSubjectStart(subject, now),
+          ),
+        )
+        .where((entry) => entry.value.isAfter(now))
+        .toList();
+    if (entries.isEmpty) {
+      return;
+    }
+    entries.sort((a, b) => a.value.compareTo(b.value));
+    int idIndex = 0;
+    for (final entry in entries) {
+      if (idIndex >= _classReminderMaxCount) {
+        break;
+      }
+      final subject = entry.key;
+      final start = entry.value;
+      final reminderTime = start.subtract(Duration(minutes: reminderMinutes));
+      if (!reminderTime.isAfter(now)) {
+        continue;
+      }
+      final id = _classReminderBaseId + idIndex;
+      idIndex += 1;
+      final roomText =
+          subject.room.isNotEmpty ? ' tại ${subject.room}' : '';
+      final title = 'Nhắc lịch học';
+      final body =
+          '${subject.name} lúc ${subject.startTime}$roomText';
+      await AlarmService.scheduleReminder(
+        id: id,
+        time: reminderTime,
+        title: title,
+        body: body,
+      );
+    }
+  }
 }
 
 
@@ -725,6 +793,7 @@ Future<void> main() async {
         ChangeNotifierProvider(create: (_) => PersonaState()),
         ChangeNotifierProvider(create: (_) => ScheduleState()),
         ChangeNotifierProvider(create: (_) => ThemeState()),
+        ChangeNotifierProvider(create: (_) => AlarmSettingsState()),
         ChangeNotifierProvider(create: (_) => ChatState()),
       ],
       child: KaironApp(initialRoute: initialRoute),
@@ -2182,12 +2251,15 @@ class AccountSettingsPage extends StatefulWidget {
 class _AccountSettingsPageState extends State<AccountSettingsPage> {
   bool _widgetEnabled = false;
   int _reminderIntervalMinutes = 0;
+  bool _classReminderEnabled = false;
+  int _classReminderMinutes = 15;
 
   @override
   void initState() {
     super.initState();
     _loadWidgetSetting();
     _loadReminderSetting();
+    _loadAlarmSettings();
   }
 
   Future<void> _loadWidgetSetting() async {
@@ -2205,6 +2277,17 @@ class _AccountSettingsPageState extends State<AccountSettingsPage> {
     if (!mounted) return;
     setState(() {
       _reminderIntervalMinutes = minutes;
+    });
+  }
+
+  Future<void> _loadAlarmSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    final enabled = prefs.getBool('alarm_mode_enabled') ?? false;
+    final minutes = prefs.getInt('alarm_reminder_minutes') ?? 15;
+    if (!mounted) return;
+    setState(() {
+      _classReminderEnabled = enabled;
+      _classReminderMinutes = minutes <= 0 ? 15 : minutes;
     });
   }
 
@@ -2240,6 +2323,23 @@ class _AccountSettingsPageState extends State<AccountSettingsPage> {
     } else {
       await schedulePersonaReminders(minutes);
     }
+  }
+
+  Future<void> _updateClassReminderSettings({
+    bool? enabled,
+    int? minutes,
+  }) async {
+    final newEnabled = enabled ?? _classReminderEnabled;
+    final newMinutes = minutes ?? _classReminderMinutes;
+    setState(() {
+      _classReminderEnabled = newEnabled;
+      _classReminderMinutes = newMinutes;
+    });
+    final alarmSettings = context.read<AlarmSettingsState>();
+    await alarmSettings.setAlarmMode(newEnabled);
+    await alarmSettings.setReminderMinutes(newMinutes);
+    final scheduleState = context.read<ScheduleState>();
+    await scheduleState.refreshClassReminders();
   }
 
   @override
@@ -2322,6 +2422,46 @@ class _AccountSettingsPageState extends State<AccountSettingsPage> {
                 if (value == null) return;
                 _updateReminderSetting(30);
               },
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.alarm_on_outlined),
+              title: const Text('Nhắc trước giờ học'),
+              subtitle: const Text(
+                'Gửi thông báo trước khi đến giờ trong thời gian biểu',
+              ),
+            ),
+            SwitchListTile(
+              value: _classReminderEnabled,
+              title: const Text('Bật nhắc trước giờ học'),
+              subtitle: const Text('Tự động nhắc trước giờ bắt đầu mỗi lịch'),
+              onChanged: (value) {
+                _updateClassReminderSettings(enabled: value);
+              },
+            ),
+            RadioListTile<int>(
+              value: 15,
+              groupValue: _classReminderMinutes,
+              title: const Text('Nhắc trước 15 phút'),
+              enabled: _classReminderEnabled,
+              onChanged: _classReminderEnabled
+                  ? (value) {
+                      if (value == null) return;
+                      _updateClassReminderSettings(minutes: 15);
+                    }
+                  : null,
+            ),
+            RadioListTile<int>(
+              value: 30,
+              groupValue: _classReminderMinutes,
+              title: const Text('Nhắc trước 30 phút'),
+              enabled: _classReminderEnabled,
+              onChanged: _classReminderEnabled
+                  ? (value) {
+                      if (value == null) return;
+                      _updateClassReminderSettings(minutes: 30);
+                    }
+                  : null,
             ),
             const Divider(),
             ListTile(
