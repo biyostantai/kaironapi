@@ -508,6 +508,7 @@ class ScheduleState extends ChangeNotifier {
 
   Future<void> reloadForCurrentUser() async {
     await _loadFromStorage();
+    await _loadFromFirestore();
   }
 
   Future<void> _saveToStorage() async {
@@ -515,6 +516,36 @@ class ScheduleState extends ChangeNotifier {
     final encoded = _subjects.map((e) => jsonEncode(e.toJson())).toList();
     await prefs.setStringList(_storageKey, encoded);
     await prefs.setStringList(_pinnedKey, _pinnedKeys.toList());
+  }
+
+  Future<void> _loadFromFirestore() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return;
+    }
+    final snapshot = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('schedules')
+        .get();
+    final fetched = snapshot.docs
+        .map(
+          (doc) => SubjectSchedule.fromJson(
+            doc.data(),
+          ),
+        )
+        .toList();
+    final previousSignature = _subjectsSignature;
+    _subjects = fetched;
+    final currentKeys = _subjects.map(_subjectKey).toSet();
+    _pinnedKeys = _pinnedKeys.where(currentKeys.contains).toSet();
+    _purgeExpired();
+    final newSignature = _buildSubjectsSignature(_subjects);
+    _subjectsSignature = newSignature;
+    if (newSignature != previousSignature) {
+      await _saveToStorage();
+    }
+    notifyListeners();
   }
 
   DateTime _parseSubjectStart(SubjectSchedule subject, DateTime now) {

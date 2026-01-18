@@ -379,7 +379,12 @@ class _KaironChatPageState extends State<KaironChatPage> {
       final Map<String, dynamic> data = jsonDecode(response.body);
       final reply = data['reply'] as String? ??
           'KaironAI bị lag nhẹ, bạn nhắn lại giúp mình với.';
-      if (data.containsKey('subjects')) {
+      final needsSync = data['needs_sync'] is bool
+          ? data['needs_sync'] as bool
+          : false;
+      if (needsSync) {
+        await scheduleState.reloadForCurrentUser();
+      } else if (data.containsKey('subjects')) {
         final raw = data['subjects'];
         if (raw is List) {
           final subjects = raw
