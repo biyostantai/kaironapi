@@ -29,6 +29,7 @@ class AlarmService {
   static NotificationDetails _buildDetails({
     required bool isReminder,
     required bool loud,
+    required bool isCritical,
     String? soundPath,
     bool useCustomSound = false,
   }) {
@@ -55,9 +56,13 @@ class AlarmService {
       channelDescription: isReminder
           ? 'Thông báo nhắc trước giờ học cho Kairon'
           : 'Báo thức toàn màn hình của Kairon',
-      importance: isReminder ? Importance.high : Importance.max,
-      priority: isReminder ? Priority.high : Priority.max,
-      fullScreenIntent: !isReminder,
+      importance: isReminder
+          ? (isCritical ? Importance.max : Importance.high)
+          : Importance.max,
+      priority: isReminder
+          ? (isCritical ? Priority.max : Priority.high)
+          : Priority.max,
+      fullScreenIntent: isReminder ? isCritical : true,
       category: AndroidNotificationCategory.alarm,
       playSound: true,
       sound: useCustomSound && soundPath != null
@@ -80,6 +85,7 @@ class AlarmService {
     required DateTime time,
     required String title,
     required String body,
+    bool isCritical = false,
   }) async {
     final now = TimeService.now();
     final scheduled = time.isBefore(now) ? now : time;
@@ -91,8 +97,11 @@ class AlarmService {
       _buildDetails(
         isReminder: true,
         loud: false,
+        isCritical: isCritical,
       ),
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      androidScheduleMode: isCritical
+          ? AndroidScheduleMode.exactAllowWhileIdle
+          : AndroidScheduleMode.inexactAllowWhileIdle,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
       matchDateTimeComponents: DateTimeComponents.dateAndTime,
@@ -118,6 +127,7 @@ class AlarmService {
       _buildDetails(
         isReminder: false,
         loud: loud,
+        isCritical: true,
         soundPath: soundPath,
         useCustomSound: useCustomSound,
       ),
@@ -145,6 +155,7 @@ class AlarmService {
     final details = _buildDetails(
       isReminder: false,
       loud: loud,
+      isCritical: true,
       soundPath: soundPath,
       useCustomSound: useCustomSound,
     );

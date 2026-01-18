@@ -766,6 +766,7 @@ class ScheduleState extends ChangeNotifier {
         time: reminderTime,
         title: title,
         body: body,
+        isCritical: true,
       );
     }
   }
