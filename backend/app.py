@@ -11,6 +11,7 @@ from firebase_admin import credentials, firestore
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from groq import Groq
+import google.generativeai as genai
 from PIL import Image
 
 
@@ -20,11 +21,17 @@ CORS(app)
 load_dotenv()
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 CHAT_MODEL = "llama-3.3-70b-versatile"
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+gemini_model = None
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel("gemini-1.5-pro")
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 LAST_CHAT_AT: dict[str, datetime] = {}
@@ -166,13 +173,27 @@ def _prepare_image_for_vision(image_bytes: bytes, mime_type: str) -> tuple[bytes
     return data, "image/jpeg"
 
 
-def _call_ai_with_image(image_bytes: bytes, mime_type: str) -> dict:
+def _parse_vision_response(raw_text: str) -> dict:
+    if not raw_text:
+        raise ExtractionError("Empty AI response")
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ExtractionError("Invalid JSON format from AI")
+    json_str = raw_text[start : end + 1]
+    try:
+        parsed = json.loads(json_str)
+    except json.JSONDecodeError as exc:
+        raise ExtractionError("Failed to parse AI JSON") from exc
+    if "subjects" not in parsed or not isinstance(parsed["subjects"], list):
+        parsed["subjects"] = []
+    return parsed
+
+
+def _run_groq_vision(image_bytes: bytes, mime_type: str) -> dict | None:
     if client is None:
-        raise ExtractionError("AI service is not configured")
-
-    image_bytes, mime_type = _prepare_image_for_vision(image_bytes, mime_type)
+        return None
     encoded_image = base64.b64encode(image_bytes).decode("utf-8")
-
     try:
         completion = client.chat.completions.create(
             model=VISION_MODEL,
@@ -194,7 +215,8 @@ def _call_ai_with_image(image_bytes: bytes, mime_type: str) -> dict:
             response_format={"type": "json_object"},
         )
     except Exception as exc:
-        raise ExtractionError(f"AI request failed: {exc}") from exc
+        print(f"Groq Vision lỗi rồi đại ca: {exc}")
+        return None
 
     message = completion.choices[0].message
     content = getattr(message, "content", None)
@@ -207,23 +229,63 @@ def _call_ai_with_image(image_bytes: bytes, mime_type: str) -> dict:
             if text:
                 raw_text += text
 
+    try:
+        return _parse_vision_response(raw_text)
+    except ExtractionError as exc:
+        print(f"Groq Vision trả về JSON lỗi: {exc}")
+        return None
+
+
+def _run_gemini_vision(image_bytes: bytes, mime_type: str) -> dict | None:
+    if gemini_model is None:
+        return None
+    try:
+        print("Đang chuyển sang dùng Gemini Vision làm dự phòng...")
+        response = gemini_model.generate_content(
+            [EXTRACTION_PROMPT, {"mime_type": mime_type, "data": image_bytes}]
+        )
+        text = getattr(response, "text", None)
+        if not isinstance(text, str):
+            text = ""
+        return _parse_vision_response(text)
+    except Exception as exc:
+        print(f"Gemini Vision cũng lỗi luôn: {exc}")
+        return None
+
+
+def _call_ai_with_image(image_bytes: bytes, mime_type: str) -> dict:
+    image_bytes, mime_type = _prepare_image_for_vision(image_bytes, mime_type)
+
+    result = _run_groq_vision(image_bytes, mime_type)
+    if result is not None:
+        return result
+
+    result = _run_gemini_vision(image_bytes, mime_type)
+    if result is not None:
+        return result
+
+    return {
+        "subjects": [],
+        "image_summary": "Không thể xử lý được nội dung trong ảnh vì dịch vụ AI đang gặp sự cố.",
+    }
+
+
+def _parse_ai_response(raw_text: str) -> dict:
     if not raw_text:
         raise ExtractionError("Empty AI response")
-
     start = raw_text.find("{")
     end = raw_text.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise ExtractionError("Invalid JSON format from AI")
-
     json_str = raw_text[start : end + 1]
     try:
         parsed = json.loads(json_str)
     except json.JSONDecodeError as exc:
         raise ExtractionError("Failed to parse AI JSON") from exc
-
+    if "reply" not in parsed or not isinstance(parsed.get("reply"), str):
+        parsed["reply"] = "KairoAI đã nhận được yêu cầu của đại ca."
     if "subjects" not in parsed or not isinstance(parsed["subjects"], list):
         parsed["subjects"] = []
-
     return parsed
 
 
@@ -256,12 +318,57 @@ def _build_persona_intro(persona: str) -> str:
     return style
 
 
+def _run_groq_chat(system_prompt: str, user_prompt: str) -> dict | None:
+    if client is None:
+        return None
+    try:
+        completion = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:
+        print(f"Groq lỗi rồi đại ca: {exc}")
+        return None
+    message_obj = completion.choices[0].message
+    content = getattr(message_obj, "content", None)
+    if isinstance(content, str):
+        raw_text = content
+    else:
+        raw_text = ""
+        for part in content or []:
+            text = getattr(part, "text", None)
+            if text:
+                raw_text += text
+    try:
+        return _parse_ai_response(raw_text)
+    except ExtractionError as exc:
+        print(f"Groq trả về JSON lỗi: {exc}")
+        return None
+
+
+def _run_gemini_chat(system_prompt: str, user_prompt: str) -> dict | None:
+    if gemini_model is None:
+        return None
+    try:
+        print("Đang chuyển sang dùng Gemini làm dự phòng...")
+        response = gemini_model.generate_content([system_prompt, user_prompt])
+        text = getattr(response, "text", None)
+        if not isinstance(text, str):
+            text = ""
+        return _parse_ai_response(text)
+    except Exception as exc:
+        print(f"Cả Gemini cũng tèo luôn: {exc}")
+        return None
+
+
 def _call_ai_for_chat(
     persona: str, history: list, message: str, subjects: list, time_mode: str
 ) -> dict:
-    if client is None:
-        raise ExtractionError("AI service is not configured")
-
     persona_intro = _build_persona_intro(persona)
 
     short_mode_note = (
@@ -396,51 +503,18 @@ Yêu cầu về câu trả lời gửi cho người dùng:
         "Hãy trả lời theo đúng định dạng JSON đã quy định ở trên."
     )
 
-    try:
-        completion = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"},
-        )
-    except Exception as exc:
-        raise ExtractionError(f"AI request failed: {exc}") from exc
+    result = _run_groq_chat(system_prompt, user_prompt)
+    if result is not None:
+        return result
 
-    message_obj = completion.choices[0].message
-    content = getattr(message_obj, "content", None)
-    if isinstance(content, str):
-        raw_text = content
-    else:
-        raw_text = ""
-        for part in content or []:
-            text = getattr(part, "text", None)
-            if text:
-                raw_text += text
+    result = _run_gemini_chat(system_prompt, user_prompt)
+    if result is not None:
+        return result
 
-    if not raw_text:
-        raise ExtractionError("Empty AI response")
-
-    start = raw_text.find("{")
-    end = raw_text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ExtractionError("Invalid JSON format from AI")
-
-    json_str = raw_text[start : end + 1]
-    try:
-        parsed = json.loads(json_str)
-    except json.JSONDecodeError as exc:
-        raise ExtractionError("Failed to parse AI JSON") from exc
-
-    if "reply" not in parsed or not isinstance(parsed.get("reply"), str):
-        parsed["reply"] = "KairoAI đã nhận được yêu cầu của đại ca."
-
-    if "subjects" not in parsed or not isinstance(parsed["subjects"], list):
-        parsed["subjects"] = []
-
-    return parsed
+    return {
+        "reply": "Cả 2 con AI đều đang bận, đại ca đợi tí nhé!",
+        "subjects": subjects,
+    }
 
 
 @app.route("/health", methods=["GET"])
