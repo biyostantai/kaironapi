@@ -348,6 +348,12 @@ def _run_groq_chat(system_prompt: str, user_prompt: str) -> dict | None:
         return _parse_ai_response(raw_text)
     except ExtractionError as exc:
         print(f"Groq trả về JSON lỗi: {exc}")
+        if raw_text:
+            # Fallback: dùng nguyên văn nội dung làm reply, không cập nhật subjects
+            return {
+                "reply": raw_text,
+                "subjects": [],
+            }
         return None
 
 
@@ -360,7 +366,17 @@ def _run_gemini_chat(system_prompt: str, user_prompt: str) -> dict | None:
         text = getattr(response, "text", None)
         if not isinstance(text, str):
             text = ""
-        return _parse_ai_response(text)
+        try:
+            return _parse_ai_response(text)
+        except ExtractionError as exc:
+            print(f"Gemini trả về JSON lỗi: {exc}")
+            if text:
+                # Fallback: dùng nguyên văn nội dung làm reply, không cập nhật subjects
+                return {
+                    "reply": text,
+                    "subjects": [],
+                }
+            return None
     except Exception as exc:
         print(f"Cả Gemini cũng tèo luôn: {exc}")
         return None
@@ -443,6 +459,18 @@ Quản lý thời gian biểu trong app:
   + Nếu mốc giờ mới trùng hoặc nằm trong khoảng +/- 5 phút so với một subject khác cùng ngày, hãy thêm cảnh báo trong "reply"
     (ví dụ: "Lưu ý: mốc giờ này đang gần trùng với lịch [Tên khác] lúc HH:MM").
   + Tuy nhiên vẫn nên tạo hoặc cập nhật subject, trừ khi người dùng yêu cầu hủy.
+- Với các yêu cầu sắp lịch lặp lại nhiều ngày trong tuần ("mỗi ngày", "hàng ngày", "cả tuần", "full tuần", "nguyên tuần", "từ thứ 2 đến chủ nhật", v.v.):
+  + Tuyệt đối không được gom tất cả vào một subject duy nhất.
+  + Phải tạo NHIỀU subject riêng biệt, mỗi subject tương ứng với MỘT ngày trong tuần.
+  + Ví dụ: câu "sắp cho tôi lịch toán 6h full tuần" phải được hiểu là 7 buổi riêng biệt
+    (Thứ 2, Thứ 3, Thứ 4, Thứ 5, Thứ 6, Thứ 7, Chủ nhật), mỗi subject có:
+    - name: "Toán" (hoặc biến thể hợp lý do bạn đặt),
+    - day_of_week: lần lượt "Thứ 2"..."Chủ nhật",
+    - start_time: "06:00" (hoặc 06:00 phù hợp với cách hiểu giờ 6h),
+    - end_time: rỗng nếu người dùng không nói rõ thời lượng,
+    - room: rỗng nếu không có địa điểm.
+  + Tương tự, nếu người dùng nói "mỗi ngày 20h học tiếng Anh" thì phải tạo các subject
+    rải đều cho các ngày trong tuần mà người dùng nhắc (mặc định là cả 7 ngày nếu họ nói "mỗi ngày").
 - Nếu người dùng hỏi về thời gian biểu hiện tại ("hôm nay tao có gì", "mai tao có lịch gì", "xem lại lịch tuần này") thì cứ trả lời hội thoại bình thường nhưng KHÔNG tự ý xóa hoặc thêm subject nếu họ không yêu cầu.
 - Nếu người dùng chỉ hỏi/nhờ giải thích nội dung, không thay đổi lịch, hãy giữ nguyên subjects (trong JSON trả về phải giữ nguyên đầy đủ mảng subjects như đầu vào, không được trả về mảng rỗng trừ khi ý định là xóa hết lịch).
 
@@ -511,8 +539,19 @@ Yêu cầu về câu trả lời gửi cho người dùng:
     if result is not None:
         return result
 
+    if client is None and gemini_model is None:
+        reply_text = (
+            "Hiện tại KairoAI chưa được cấu hình API key cho Groq/Gemini trên server "
+            "nên không thể trả lời. Nhờ đại ca kiểm tra lại cấu hình backend giúp nhé."
+        )
+    else:
+        reply_text = (
+            "Cả 2 con AI đều đang bận hoặc gặp lỗi tạm thời. "
+            "Đại ca thử lại sau vài phút hoặc báo cho admin kiểm tra server giúp nhé."
+        )
+
     return {
-        "reply": "Cả 2 con AI đều đang bận, đại ca đợi tí nhé!",
+        "reply": reply_text,
         "subjects": subjects,
     }
 
