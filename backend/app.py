@@ -7,14 +7,18 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
-import firebase_admin
 import requests
 from dotenv import load_dotenv
-from firebase_admin import credentials, firestore
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from groq import Groq
-from PIL import Image
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+except ImportError:
+    firebase_admin = None
+    credentials = None
+    firestore = None
 
 
 app = Flask(__name__)
@@ -43,6 +47,8 @@ FIRESTORE_DB = None
 
 def _get_firestore_client():
     global FIREBASE_APP, FIRESTORE_DB
+    if firebase_admin is None:
+        return None
     if FIRESTORE_DB is not None:
         return FIRESTORE_DB
 
@@ -144,35 +150,8 @@ class ExtractionError(Exception):
 def _prepare_image_for_vision(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
     max_size = 4 * 1024 * 1024
     if len(image_bytes) <= max_size:
-        return image_bytes, mime_type
-
-    try:
-        image = Image.open(BytesIO(image_bytes))
-    except Exception:
-        return image_bytes, mime_type
-
-    image = image.convert("RGB")
-
-    quality = 85
-    while quality >= 40:
-        buffer = BytesIO()
-        image.save(buffer, format="JPEG", quality=quality, optimize=True)
-        data = buffer.getvalue()
-        if len(data) <= max_size:
-            return data, "image/jpeg"
-        quality -= 10
-
-    width, height = image.size
-    longest = max(width, height)
-    if longest > 1280:
-        scale = 1280 / float(longest)
-        new_size = (int(width * scale), int(height * scale))
-        image = image.resize(new_size, Image.LANCZOS)
-
-    buffer = BytesIO()
-    image.save(buffer, format="JPEG", quality=75, optimize=True)
-    data = buffer.getvalue()
-    return data, "image/jpeg"
+        return image_bytes, mime_type or "image/jpeg"
+    return image_bytes[:max_size], mime_type or "image/jpeg"
 
 
 def _parse_vision_response(raw_text: str) -> dict:
@@ -237,27 +216,32 @@ def _call_groq_chat_once(api_key: str, system_prompt: str, user_prompt: str) -> 
     if not api_key:
         return None, False
     try:
-        client = Groq(api_key=api_key)
-        completion = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": CHAT_MODEL,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.7,
-            max_tokens=1000,
-        )
-        message_obj = completion.choices[0].message
-        content = getattr(message_obj, "content", None)
-        if isinstance(content, str):
-            raw_text = content
-        else:
-            raw_text = ""
-            for part in content or []:
-                text = getattr(part, "text", None)
-                if text:
-                    raw_text += text
-        return raw_text, False
+            "temperature": 0.7,
+            "max_tokens": 1000,
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            print("Groq chat trả về rỗng hoặc không có choices.")
+            return None, False
+        message_obj = choices[0].get("message") or {}
+        content = message_obj.get("content") or ""
+        if not isinstance(content, str):
+            content = str(content)
+        return content, False
     except Exception as exc:
         msg = str(exc).lower()
         is_rate_limit = "429" in msg or "rate limit" in msg
@@ -272,36 +256,43 @@ def _call_groq_vision_once(api_key: str, prompt: str, image_bytes: bytes, mime_t
     encoded_image = base64.b64encode(image_bytes).decode("utf-8")
 
     try:
-        client = Groq(api_key=api_key)
-        completion = client.chat.completions.create(
-            model=VISION_MODEL,
-            messages=[
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": VISION_MODEL,
+            "messages": [
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{encoded_image}"},
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{encoded_image}"
+                            },
                         },
                     ],
                 }
             ],
-            temperature=0.7,
-            max_tokens=1000,
-            response_format={"type": "json_object"},
-        )
-        message = completion.choices[0].message
-        content = getattr(message, "content", None)
-        if isinstance(content, str):
-            raw_text = content
-        else:
-            raw_text = ""
-            for part in content or []:
-                text = getattr(part, "text", None)
-                if text:
-                    raw_text += text
-        return raw_text, False
+            "temperature": 0.7,
+            "max_tokens": 1000,
+            "response_format": {"type": "json_object"},
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            print("Groq Vision trả về rỗng hoặc không có choices.")
+            return None, False
+        message_obj = choices[0].get("message") or {}
+        content = message_obj.get("content") or ""
+        if not isinstance(content, str):
+            content = str(content)
+        return content, False
     except Exception as exc:
         msg = str(exc).lower()
         is_rate_limit = "429" in msg or "rate limit" in msg
