@@ -1,0 +1,39 @@
+name: sep_lich
+description: Ứng dụng Kairo - siêu trợ lý sắp xếp thời khóa biểu.
+version: 1.0.0+1
+publish_to: "none"
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  camera: ^0.10.5+9
+  http: ^1.2.0
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.1
+  flutter_local_notifications: ^17.2.2
+  home_widget:
+    git:
+      url: https://github.com/gskinnerTeam/flutter_home_widget_fork.git
+  provider: ^6.1.2
+  image_picker: ^1.2.0
+  intl: ^0.19.0
+  shared_preferences: ^2.3.2
+  file_picker: ^10.3.8
+  google_sign_in: ^6.2.1
+  timezone: ^0.9.4
+  flutter_image_compress: ^2.3.0
+  table_calendar: ^3.0.9
+  animated_text_kit: ^4.2.2
+  cloud_firestore: ^5.4.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

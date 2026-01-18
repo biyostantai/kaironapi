@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "948643982849",
+    "project_id": "kairoapp-a9cbc",
+    "storage_bucket": "kairoapp-a9cbc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:948643982849:android:5550b044f48156801f9a00",
+        "android_client_info": {
+          "package_name": "com.example.sep_lich"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAbIq_0pnwEO4yi4CpSq7_mJkHFz1zFfwI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
