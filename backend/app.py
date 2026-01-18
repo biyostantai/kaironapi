@@ -1,17 +1,19 @@
 import base64
 import json
 import os
+import random
+import re
 from datetime import datetime, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
 import firebase_admin
+import requests
 from dotenv import load_dotenv
 from firebase_admin import credentials, firestore
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from groq import Groq
-import google.generativeai as genai
 from PIL import Image
 
 
@@ -20,18 +22,18 @@ CORS(app)
 
 load_dotenv()
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+GROQ_KEY_1 = os.getenv("GROQ_KEY_1")
+GROQ_KEY_2 = os.getenv("GROQ_KEY_2")
+GROQ_KEY_3 = os.getenv("GROQ_KEY_3")
+GROQ_KEY_4 = os.getenv("GROQ_KEY_4")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 CHAT_MODEL = "llama-3.3-70b-versatile"
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+VISION_MODEL = "llama-3.2-11b-vision-preview"
 
-gemini_model = None
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel("gemini-1.5-pro")
+FALLBACK_MESSAGE = (
+    "Đại ca ơi, khách đang đông quá em xử lý không kịp, đại ca đợi em vài giây nhé!"
+)
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 LAST_CHAT_AT: dict[str, datetime] = {}
@@ -190,83 +192,25 @@ def _parse_vision_response(raw_text: str) -> dict:
     return parsed
 
 
-def _run_groq_vision(image_bytes: bytes, mime_type: str) -> dict | None:
-    if client is None:
-        return None
-    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
-    try:
-        completion = client.chat.completions.create(
-            model=VISION_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": EXTRACTION_PROMPT},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{encoded_image}"
-                            },
-                        },
-                    ],
-                }
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
-    except Exception as exc:
-        print(f"Groq Vision lỗi rồi đại ca: {exc}")
-        return None
-
-    message = completion.choices[0].message
-    content = getattr(message, "content", None)
-    if isinstance(content, str):
-        raw_text = content
-    else:
-        raw_text = ""
-        for part in content or []:
-            text = getattr(part, "text", None)
-            if text:
-                raw_text += text
-
-    try:
-        return _parse_vision_response(raw_text)
-    except ExtractionError as exc:
-        print(f"Groq Vision trả về JSON lỗi: {exc}")
-        return None
-
-
-def _run_gemini_vision(image_bytes: bytes, mime_type: str) -> dict | None:
-    if gemini_model is None:
-        return None
-    try:
-        print("Đang chuyển sang dùng Gemini Vision làm dự phòng...")
-        response = gemini_model.generate_content(
-            [EXTRACTION_PROMPT, {"mime_type": mime_type, "data": image_bytes}]
-        )
-        text = getattr(response, "text", None)
-        if not isinstance(text, str):
-            text = ""
-        return _parse_vision_response(text)
-    except Exception as exc:
-        print(f"Gemini Vision cũng lỗi luôn: {exc}")
-        return None
-
-
 def _call_ai_with_image(image_bytes: bytes, mime_type: str) -> dict:
     image_bytes, mime_type = _prepare_image_for_vision(image_bytes, mime_type)
 
-    result = _run_groq_vision(image_bytes, mime_type)
-    if result is not None:
-        return result
+    raw = get_ai_response(
+        "image",
+        vision_prompt=EXTRACTION_PROMPT,
+        image_bytes=image_bytes,
+        mime_type=mime_type,
+    )
 
-    result = _run_gemini_vision(image_bytes, mime_type)
-    if result is not None:
-        return result
+    if raw:
+        try:
+            return _parse_vision_response(raw)
+        except ExtractionError as exc:
+            print(f"AI Vision trả về JSON lỗi: {exc}")
 
     return {
         "subjects": [],
-        "image_summary": "Không thể xử lý được nội dung trong ảnh vì dịch vụ AI đang gặp sự cố.",
+        "image_summary": FALLBACK_MESSAGE,
     }
 
 
@@ -287,6 +231,180 @@ def _parse_ai_response(raw_text: str) -> dict:
     if "subjects" not in parsed or not isinstance(parsed["subjects"], list):
         parsed["subjects"] = []
     return parsed
+
+
+def _call_groq_chat_once(api_key: str, system_prompt: str, user_prompt: str) -> tuple[str | None, bool]:
+    if not api_key:
+        return None, False
+    try:
+        client = Groq(api_key=api_key)
+        completion = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        message_obj = completion.choices[0].message
+        content = getattr(message_obj, "content", None)
+        if isinstance(content, str):
+            raw_text = content
+        else:
+            raw_text = ""
+            for part in content or []:
+                text = getattr(part, "text", None)
+                if text:
+                    raw_text += text
+        return raw_text, False
+    except Exception as exc:
+        msg = str(exc).lower()
+        is_rate_limit = "429" in msg or "rate limit" in msg
+        print(f"Groq chat lỗi với một key: {exc}")
+        return None, is_rate_limit
+
+
+def _call_groq_vision_once(api_key: str, prompt: str, image_bytes: bytes, mime_type: str) -> tuple[str | None, bool]:
+    if not api_key:
+        return None, False
+
+    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+
+    try:
+        client = Groq(api_key=api_key)
+        completion = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{encoded_image}"},
+                        },
+                    ],
+                }
+            ],
+            temperature=0.7,
+            max_tokens=1000,
+            response_format={"type": "json_object"},
+        )
+        message = completion.choices[0].message
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            raw_text = content
+        else:
+            raw_text = ""
+            for part in content or []:
+                text = getattr(part, "text", None)
+                if text:
+                    raw_text += text
+        return raw_text, False
+    except Exception as exc:
+        msg = str(exc).lower()
+        is_rate_limit = "429" in msg or "rate limit" in msg
+        print(f"Groq Vision lỗi với một key: {exc}")
+        return None, is_rate_limit
+
+
+def _call_deepseek_chat(system_prompt: str, user_prompt: str) -> str | None:
+    api_key = DEEPSEEK_API_KEY
+    if not api_key:
+        return None
+
+    url = "https://api.deepseek.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": 1000,
+        "temperature": 0.7,
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            print("DeepSeek trả về rỗng hoặc không có choices.")
+            return None
+        message_obj = choices[0].get("message") or {}
+        text = message_obj.get("content") or ""
+        if not isinstance(text, str):
+            text = str(text)
+        return text
+    except Exception as exc:
+        print(f"DeepSeek cũng lỗi luôn: {exc}")
+        return None
+
+
+def get_ai_response(
+    mode: str,
+    *,
+    system_prompt: str | None = None,
+    user_prompt: str | None = None,
+    vision_prompt: str | None = None,
+    image_bytes: bytes | None = None,
+    mime_type: str | None = None,
+) -> str | None:
+    if mode == "text":
+        keys = [k for k in (GROQ_KEY_1, GROQ_KEY_2, GROQ_KEY_3) if k]
+        any_key = bool(keys)
+        all_429 = bool(keys)
+
+        for api_key in keys:
+            raw, is_429 = _call_groq_chat_once(api_key, system_prompt or "", user_prompt or "")
+            if raw:
+                return raw
+            if not is_429:
+                all_429 = False
+
+        if all_429 and any_key:
+            raw = _call_deepseek_chat(system_prompt or "", user_prompt or "")
+            if raw:
+                return raw
+
+        return FALLBACK_MESSAGE
+
+    if mode == "image":
+        keys = [k for k in (GROQ_KEY_1, GROQ_KEY_2, GROQ_KEY_3) if k]
+        any_key = bool(keys)
+        all_429 = bool(keys)
+
+        for api_key in keys:
+            raw, is_429 = _call_groq_vision_once(
+                api_key,
+                vision_prompt or "",
+                image_bytes or b"",
+                mime_type or "image/jpeg",
+            )
+            if raw:
+                return raw
+            if not is_429:
+                all_429 = False
+
+        if all_429 and any_key and GROQ_KEY_4:
+            raw, _ = _call_groq_vision_once(
+                GROQ_KEY_4,
+                vision_prompt or "",
+                image_bytes or b"",
+                mime_type or "image/jpeg",
+            )
+            if raw:
+                return raw
+
+        return FALLBACK_MESSAGE
+
+    return FALLBACK_MESSAGE
 
 
 def _build_persona_intro(persona: str) -> str:
@@ -318,68 +436,78 @@ def _build_persona_intro(persona: str) -> str:
     return style
 
 
-def _run_groq_chat(system_prompt: str, user_prompt: str) -> dict | None:
-    if client is None:
-        return None
-    try:
-        completion = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"},
-        )
-    except Exception as exc:
-        print(f"Groq lỗi rồi đại ca: {exc}")
-        return None
-    message_obj = completion.choices[0].message
-    content = getattr(message_obj, "content", None)
-    if isinstance(content, str):
-        raw_text = content
+def _build_full_week_subjects_from_message(message: str) -> list[dict]:
+    text = (message or "").strip()
+    lower = text.lower()
+    fullweek_markers = [
+        "full tuần",
+        "nguyên tuần",
+        "cả tuần",
+        "mỗi ngày",
+        "hàng ngày",
+        "hang ngay",
+        "tuần",
+    ]
+    if not any(m in lower for m in fullweek_markers):
+        return []
+    time_hm = None
+    m = re.search(r"(\d{1,2})\s*[:h]\s*(\d{1,2})", lower)
+    if m:
+        h = int(m.group(1))
+        mi = int(m.group(2))
+        time_hm = (h, mi)
     else:
-        raw_text = ""
-        for part in content or []:
-            text = getattr(part, "text", None)
-            if text:
-                raw_text += text
-    try:
-        return _parse_ai_response(raw_text)
-    except ExtractionError as exc:
-        print(f"Groq trả về JSON lỗi: {exc}")
-        if raw_text:
-            # Fallback: dùng nguyên văn nội dung làm reply, không cập nhật subjects
-            return {
-                "reply": raw_text,
-                "subjects": [],
+        m2 = re.search(r"(\d{1,2})\s*giờ\s*(rưỡi)?", lower)
+        if m2:
+            h = int(m2.group(1))
+            mi = 30 if m2.group(2) else 0
+            time_hm = (h, mi)
+        else:
+            m3 = re.search(r"(\d{1,2})\s*h\b", lower)
+            if m3:
+                h = int(m3.group(1))
+                time_hm = (h, 0)
+    if time_hm is None:
+        return []
+    h, mi = time_hm
+    h = max(0, min(23, h))
+    mi = max(0, min(59, mi))
+    hh = str(h).rjust(2, "0")
+    mm = str(mi).rjust(2, "0")
+    start_time = f"{hh}:{mm}"
+    name = "Lịch cá nhân"
+    idx = lower.find("lịch")
+    if idx != -1:
+        end_time_idx = lower.find(start_time.replace(":", ":"), idx)
+        if end_time_idx == -1:
+            end_time_idx = lower.find("h", idx)
+        if end_time_idx != -1:
+            raw = text[idx + len("lịch") : end_time_idx]
+            raw = raw.strip(" :.-")
+            if raw:
+                name = raw.title()
+    days = [
+        "Thứ 2",
+        "Thứ 3",
+        "Thứ 4",
+        "Thứ 5",
+        "Thứ 6",
+        "Thứ 7",
+        "Chủ nhật",
+    ]
+    subjects = []
+    for d in days:
+        subjects.append(
+            {
+                "name": name,
+                "day_of_week": d,
+                "start_time": start_time,
+                "end_time": "",
+                "room": "",
+                "specific_date": "",
             }
-        return None
-
-
-def _run_gemini_chat(system_prompt: str, user_prompt: str) -> dict | None:
-    if gemini_model is None:
-        return None
-    try:
-        print("Đang chuyển sang dùng Gemini làm dự phòng...")
-        response = gemini_model.generate_content([system_prompt, user_prompt])
-        text = getattr(response, "text", None)
-        if not isinstance(text, str):
-            text = ""
-        try:
-            return _parse_ai_response(text)
-        except ExtractionError as exc:
-            print(f"Gemini trả về JSON lỗi: {exc}")
-            if text:
-                # Fallback: dùng nguyên văn nội dung làm reply, không cập nhật subjects
-                return {
-                    "reply": text,
-                    "subjects": [],
-                }
-            return None
-    except Exception as exc:
-        print(f"Cả Gemini cũng tèo luôn: {exc}")
-        return None
+        )
+    return subjects
 
 
 def _call_ai_for_chat(
@@ -531,27 +659,31 @@ Yêu cầu về câu trả lời gửi cho người dùng:
         "Hãy trả lời theo đúng định dạng JSON đã quy định ở trên."
     )
 
-    result = _run_groq_chat(system_prompt, user_prompt)
-    if result is not None:
-        return result
+    raw_reply = get_ai_response(
+        "text",
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+    )
 
-    result = _run_gemini_chat(system_prompt, user_prompt)
-    if result is not None:
-        return result
+    if raw_reply:
+        try:
+            return _parse_ai_response(raw_reply)
+        except ExtractionError as exc:
+            print(f"AI chat trả về JSON lỗi: {exc}")
 
-    if client is None and gemini_model is None:
-        reply_text = (
-            "Hiện tại KairoAI chưa được cấu hình API key cho Groq/Gemini trên server "
-            "nên không thể trả lời. Nhờ đại ca kiểm tra lại cấu hình backend giúp nhé."
-        )
-    else:
-        reply_text = (
-            "Cả 2 con AI đều đang bận hoặc gặp lỗi tạm thời. "
-            "Đại ca thử lại sau vài phút hoặc báo cho admin kiểm tra server giúp nhé."
-        )
+    local_subjects = _build_full_week_subjects_from_message(message)
+    if local_subjects:
+        first = local_subjects[0]
+        reply_text = f"Đã thiết lập nhắc nhở: {first.get('name','Lịch cá nhân')} vào lúc {first.get('start_time','')} mỗi ngày trong tuần."
+        return {
+            "reply": reply_text,
+            "subjects": local_subjects,
+        }
+
+    final_reply = raw_reply or FALLBACK_MESSAGE
 
     return {
-        "reply": reply_text,
+        "reply": final_reply,
         "subjects": subjects,
     }
 
