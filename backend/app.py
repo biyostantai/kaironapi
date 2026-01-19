@@ -501,10 +501,71 @@ def _build_full_week_subjects_from_message(message: str) -> list[dict]:
     return subjects
 
 
+def _build_persona_intro(persona: str) -> str:
+    if persona == "funny":
+        return "thân thiện, hài hước, hay đùa"
+    elif persona == "angry":
+        return "cục súc, hay quạo nhưng vẫn giúp đỡ"
+    else:
+        return "nghiêm túc, ngắn gọn, chuyên nghiệp"
+
+def _calculate_relative_time(message: str, now_vn: datetime) -> str | None:
+    """
+    Phân tích message để tìm ý định 'X phút/giờ nữa'.
+    Nếu tìm thấy, tính toán thời gian đích và trả về chuỗi hướng dẫn cho AI.
+    """
+    msg_lower = message.lower()
+    
+    # 1. Xử lý "lát nữa", "xíu nữa" -> mặc định 20 phút
+    if any(k in msg_lower for k in ["lát nữa", "lat nua", "xíu nữa", "xiu nua", "chút nữa", "chut nua"]):
+        delta = 20
+        target = now_vn + timedelta(minutes=delta)
+        return _format_target_time_hint(target, f"{delta} phút")
+
+    # 2. Xử lý "X giờ/tiếng nữa"
+    # Regex: số + (h|giờ|tiếng) + (nữa|nua)
+    match_hour = re.search(r"(\d+)\s*(h|giờ|tiếng|g)\s*(nữa|nua)", msg_lower)
+    if match_hour:
+        try:
+            val = int(match_hour.group(1))
+            target = now_vn + timedelta(hours=val)
+            return _format_target_time_hint(target, f"{val} giờ")
+        except ValueError:
+            pass
+
+    # 3. Xử lý "X phút nữa"
+    # Regex: số + (p|phút|phut|m|min) + (nữa|nua)
+    match_min = re.search(r"(\d+)\s*(p|phút|phut|m|min)\s*(nữa|nua)", msg_lower)
+    if match_min:
+        try:
+            val = int(match_min.group(1))
+            target = now_vn + timedelta(minutes=val)
+            return _format_target_time_hint(target, f"{val} phút")
+        except ValueError:
+            pass
+
+    return None
+
+def _format_target_time_hint(target: datetime, duration_str: str) -> str:
+    days_map = {0: "Thứ 2", 1: "Thứ 3", 2: "Thứ 4", 3: "Thứ 5", 4: "Thứ 6", 5: "Thứ 7", 6: "Chủ nhật"}
+    day_str = days_map.get(target.weekday(), "")
+    time_str = target.strftime("%H:%M")
+    date_str = target.strftime("%d/%m/%Y")
+    return (
+        f"HỆ THỐNG ĐÃ TÍNH TOÁN CHÍNH XÁC: Người dùng muốn nhắc sau {duration_str}. "
+        f"Thời gian mục tiêu là: {day_str}, {time_str} (ngày {date_str}). "
+        f"Hãy tạo subject với day_of_week='{day_str}', start_time='{time_str}', specific_date='{date_str}'."
+    )
+
+
 def _call_ai_for_chat(
-    persona: str, history: list, message: str, subjects: list, time_mode: str
+    persona: str, history: list, message: str, subjects: list, time_mode: str, current_time_str: str
 ) -> dict:
     persona_intro = _build_persona_intro(persona)
+    
+    # Tính toán relative time hint
+    now_vn_calc = datetime.now(VN_TZ)
+    relative_time_hint = _calculate_relative_time(message, now_vn_calc) or ""
 
     short_mode_note = (
         "\nHiện tại đang trong khung giờ đêm (sau 23h đến trước 7h sáng theo giờ Việt Nam). "
@@ -564,14 +625,11 @@ Quản lý thời gian biểu trong app:
   + Nếu người dùng KHÔNG cung cấp thông tin lịch mới (qua ảnh hoặc text), hãy trả về "subjects": [] để xóa sạch lịch cũ, và trong "reply" hãy xác nhận đã xóa lịch cũ và nhắc người dùng gửi ảnh hoặc nhập lịch mới.
   + Nếu người dùng CÓ cung cấp thông tin lịch mới (trong cùng tin nhắn hoặc qua dữ liệu trích xuất từ ảnh), hãy dùng thông tin đó để tạo danh sách subjects mới (thay thế hoàn toàn lịch cũ).
 - Đặc biệt, với các câu kiểu "X phút nữa làm Y", "trong Xp nữa nhắc Y", "sau X phút nữa nhắc chuyện Z":
-  + Dùng thời điểm hiện tại (ISO 8601) đã được truyền trong tin nhắn người dùng để tính ra mốc thời gian cụ thể.
-  + Tính thời gian bắt đầu mới = thời điểm hiện tại + X phút.
-  + Xác định thứ (day_of_week) theo ngày của mốc thời gian mới đó (Thứ 2...Chủ nhật).
-  + Tạo một subject mới với:
-    - name = hành động người dùng muốn làm (ví dụ: "Đi tắm", "Học Toán", "Gọi điện cho mẹ"),
-    - day_of_week = thứ tương ứng,
-    - start_time = giờ:phút của mốc đó theo định dạng "HH:MM" 24h,
-    - end_time = "" nếu người dùng không nói rõ thời lượng,
+  + ƯU TIÊN TUYỆT ĐỐI thông tin từ "HỆ THỐNG ĐÃ TÍNH TOÁN CHÍNH XÁC" (nếu có) để xác định giờ và thứ.
+  + Nếu không có thông tin hệ thống, hãy dùng "Thời gian hiện tại" để tính toán thủ công:
+    - Tính thời gian bắt đầu mới = thời điểm hiện tại + X phút.
+    - Xác định chính xác "Thứ" (day_of_week) dựa trên "Thời gian hiện tại".
+  + Tạo subject mới với thông tin đã tính toán.
     - room = "" nếu không có địa điểm cụ thể.
 - Với các yêu cầu "dời lịch [Tên việc] thêm X phút" hoặc "dời [Tên việc] lùi X phút":
   + Tìm trong danh sách subjects công việc có name khớp với [Tên việc] (ưu tiên so khớp gần đúng, không phân biệt hoa thường).
@@ -646,7 +704,9 @@ Yêu cầu về câu trả lời gửi cho người dùng:
     subjects_text = json.dumps(subjects, ensure_ascii=False)
 
     user_prompt = (
-        f"Chế độ thời gian hiện tại: {'ban ngày (7h-23h)' if time_mode == 'day' else 'ban đêm (23h-7h, trả lời ngắn gọn)'}.\n"
+        f"Thời gian hiện tại: {current_time_str}\n"
+        f"{relative_time_hint}\n"
+        f"Chế độ thời gian: {'ban ngày (7h-23h)' if time_mode == 'day' else 'ban đêm (23h-7h, trả lời ngắn gọn)'}.\n"
         f"Lịch hiện tại (subjects): {subjects_text}\n\n"
         f"Lịch sử hội thoại:\n{history_text}\n"
         f"Tin nhắn mới của người dùng: {message}\n\n"
@@ -675,11 +735,32 @@ Yêu cầu về câu trả lời gửi cho người dùng:
         }
 
     final_reply = raw_reply or FALLBACK_MESSAGE
-
     return {
         "reply": final_reply,
         "subjects": subjects,
     }
+
+
+def _parse_ai_response(raw_json: str) -> dict:
+    try:
+        # Clean up code blocks if present
+        clean_json = raw_json.strip()
+        if clean_json.startswith("```"):
+            lines = clean_json.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            clean_json = "\n".join(lines).strip()
+        
+        data = json.loads(clean_json)
+        return data
+    except json.JSONDecodeError as e:
+        raise ExtractionError(f"Invalid JSON: {e}")
+
+
+class ExtractionError(Exception):
+    pass
 
 
 @app.route("/health", methods=["GET"])
@@ -777,6 +858,10 @@ def chat():
     is_daytime = 7 <= hour < 23
     time_mode = "day" if is_daytime else "night"
 
+    days_map = {0: "Thứ 2", 1: "Thứ 3", 2: "Thứ 4", 3: "Thứ 5", 4: "Thứ 6", 5: "Thứ 7", 6: "Chủ nhật"}
+    weekday_vn = days_map.get(now_vn.weekday(), "Thứ 2")
+    current_time_str = f"{weekday_vn}, {now_vn.strftime('%d/%m/%Y %H:%M')}"
+
     if not is_daytime:
         last_at = LAST_CHAT_AT.get(user_id)
         if last_at is not None:
@@ -805,7 +890,7 @@ def chat():
         return jsonify({"error": "Empty message"}), 400
 
     try:
-        result = _call_ai_for_chat(persona, history, message, subjects, time_mode)
+        result = _call_ai_for_chat(persona, history, message, subjects, time_mode, current_time_str)
     except ExtractionError as exc:
         return jsonify({"error": str(exc)}), 502
 
