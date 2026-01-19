@@ -560,6 +560,9 @@ Quản lý thời gian biểu trong app:
 - Với các yêu cầu xóa lịch ("xóa lịch [Tên việc]", "xóa nhắc [Tên việc]", "xóa nhắc lúc HH:MM", "xóa hết lịch ngày mai", "xóa toàn bộ lịch"):
   + Phải cập nhật lại mảng subjects sao cho đã loại bỏ các subject tương ứng.
   + Nếu người dùng yêu cầu xóa toàn bộ lịch, có thể trả về mảng subjects rỗng để biểu thị rằng không còn lịch nào.
+- Với yêu cầu "tạo thời khóa biểu mới", "làm lại lịch", "học kỳ mới", "xếp lịch mới" (ý định reset/bắt đầu lại):
+  + Nếu người dùng KHÔNG cung cấp thông tin lịch mới (qua ảnh hoặc text), hãy trả về "subjects": [] để xóa sạch lịch cũ, và trong "reply" hãy xác nhận đã xóa lịch cũ và nhắc người dùng gửi ảnh hoặc nhập lịch mới.
+  + Nếu người dùng CÓ cung cấp thông tin lịch mới (trong cùng tin nhắn hoặc qua dữ liệu trích xuất từ ảnh), hãy dùng thông tin đó để tạo danh sách subjects mới (thay thế hoàn toàn lịch cũ).
 - Đặc biệt, với các câu kiểu "X phút nữa làm Y", "trong Xp nữa nhắc Y", "sau X phút nữa nhắc chuyện Z":
   + Dùng thời điểm hiện tại (ISO 8601) đã được truyền trong tin nhắn người dùng để tính ra mốc thời gian cụ thể.
   + Tính thời gian bắt đầu mới = thời điểm hiện tại + X phút.
